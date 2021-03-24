@@ -133,24 +133,38 @@ ssize_t ubus_msg_writev(int fd, struct ubus_msg_buf *ub, size_t offset)
 	return ret;
 }
 
-static void ubus_msg_enqueue(struct ubus_client *cl, struct ubus_msg_buf *ub)
+void ubus_msg_list_free(struct ubus_msg_buf_list *ubl)
 {
-	if (cl->tx_queue[cl->txq_tail])
+	list_del_init(&ubl->list);
+	ubus_msg_free(ubl->msg);
+	free(ubl);
+}
+
+static void ubus_msg_enqueue(struct ubus_client *cl, struct ubus_msg_buf *ub,
+			     size_t offset)
+{
+	struct ubus_msg_buf_list *ubl;
+
+	ubl = calloc(1, sizeof(struct ubus_msg_buf_list));
+	if (!ubl)
 		return;
 
-	cl->tx_queue[cl->txq_tail] = ubus_msg_ref(ub);
-	cl->txq_tail = (cl->txq_tail + 1) % ARRAY_SIZE(cl->tx_queue);
+	INIT_LIST_HEAD(&ubl->list);
+	ubl->msg = ubus_msg_ref(ub);
+	ubl->offset = offset;
+
+	list_add_tail(&cl->tx_queue, &ubl->list);
 }
 
 /* takes the msgbuf reference */
 void ubus_msg_send(struct ubus_client *cl, struct ubus_msg_buf *ub)
 {
-	ssize_t written;
+	ssize_t written = 0;
 
 	if (ub->hdr.type != UBUS_MSG_MONITOR)
 		ubusd_monitor_message(cl, ub, true);
 
-	if (!cl->tx_queue[cl->txq_cur]) {
+	if (list_empty(&cl->tx_queue)) {
 		written = ubus_msg_writev(cl->sock.fd, ub, 0);
 
 		if (written < 0)
@@ -159,10 +173,8 @@ void ubus_msg_send(struct ubus_client *cl, struct ubus_msg_buf *ub)
 		if (written >= (ssize_t) (ub->len + sizeof(ub->hdr)))
 			return;
 
-		cl->txq_ofs = written;
-
 		/* get an event once we can write to the socket again */
 		uloop_fd_add(&cl->sock, ULOOP_READ | ULOOP_WRITE | ULOOP_EDGE_TRIGGER);
 	}
-	ubus_msg_enqueue(cl, ub);
+	ubus_msg_enqueue(cl, ub, written);
 }
